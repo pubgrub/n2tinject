@@ -33,14 +33,6 @@ impl Buffer {
             pos: 0,
         }
     }
-
-    fn clear(&mut self) {
-        self.pos = 0;
-    }
-
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.buf[0..self.pos]).unwrap()
-    }
 }
 
 impl Write for Buffer {
@@ -52,6 +44,57 @@ impl Write for Buffer {
         Ok(())
     }
 }
+
+mod string {
+    use core::u8;
+
+    pub struct String {
+        buf: [u8; 64],
+        size: usize,
+    }
+    impl String {
+        pub fn new(data: [u8; 64]) -> Self {
+            String {
+                buf: data,
+                size: String::calc_size(data),
+            }
+        }
+
+        pub fn get(&self) -> [u8; 64] {
+            self.buf
+        }
+        pub fn get_size(&self) -> usize {
+            self.size
+        }
+
+        pub fn set(&mut self, data: [u8; 64]) -> () {
+            self.buf = data;
+            self.size = String::calc_size(data);
+        }
+
+        fn calc_size(data: [u8; 64]) -> usize {
+            let mut size = 0;
+            for i in 0..64 {
+                if data[i] == 0 {
+                    break;
+                }
+                size += 1;
+            }
+            size
+        }
+
+        pub fn clear(&mut self) {
+            self.buf = [0; 64];
+            self.size = 0;
+        }
+
+        fn as_str(&self) -> &str {
+            core::str::from_utf8(&self.buf[0..self.size]).unwrap()
+        }
+    }
+}
+
+use string::String;
 
 fn u64_to_str(n: u64) -> Buffer {
     let mut buf = Buffer::new();
@@ -66,15 +109,25 @@ fn setup_systick(syst: &mut pac::SYST, reload_value: u32) {
     syst.enable_counter(); // Start counting
 }
 
-fn tokenize(input: [u8; 64]) -> [[u8; 64]; 4] {
-    let mut tokens: [[u8; 64]; 4] = [[b' '; 64]; 4];
-    let mut token: [u8; 64] = [b' '; 64];
+fn tokenize(input: [u8; 64]) -> [String; 4] {
+    let mut tokens: [String; 4] = [
+        String::new([0; 64]),
+        String::new([0; 64]),
+        String::new([0; 64]),
+        String::new([0; 64]),
+    ];
+    let mut token: [u8; 64] = [0u8; 64];
     let mut token_index = 0;
     let mut token_count = 0;
-    input = input.trim_end().to_owned();
     for i in 0..64 {
+        if input[i] == 0 {
+            break;
+        }
         if input[i] == 0x20 {
-            tokens[token_count] = token;
+            if token_index == 0 {
+                continue;
+            }
+            tokens[token_count].set(token);
             token = [0; 64];
             token_index = 0;
             token_count += 1;
@@ -83,7 +136,7 @@ fn tokenize(input: [u8; 64]) -> [[u8; 64]; 4] {
             token_index += 1;
         }
     }
-    tokens[token_count] = token;
+    tokens[token_count].set(token);
     tokens
 }
 
@@ -244,8 +297,8 @@ fn main() -> ! {
     let blink_interval = 1_000_000u64;
     let mut blink_last = 0u64;
 
-    let t1 = 10_000u64; // time from data out to enable on and from enable off to end of cycle
-    let t2 = 10_000u64; // time from enable on to enable off
+    let mut t1 = 10_000u64; // time from data out to enable on and from enable off to end of cycle
+    let mut t2 = 10_000u64; // time from enable on to enable off
 
     let mut now;
 
@@ -340,17 +393,25 @@ fn main() -> ! {
             let mut changed = true;
             while changed {
                 changed = false;
-                match tokens[0][0] {
+                match tokens[0].get()[0] {
                     b'z' | b'0' | b'r' => {
-                        tokens[1] = tokens[0];
-                        tokens[0] = all_channels_str;
+                        tokens[1].set(tokens[0].get());
+                        tokens[0].set(all_channels_str);
                         changed = true;
                     }
+                    b'+' => {
+                        t1 = 100.max(t1 / 10);
+                        t2 = 100.max(t2 / 10);
+                    }
+                    b'-' => {
+                        t1 = 1_000_000.min(t1 * 10);
+                        t2 = 1_000_000.min(t2 * 10);
+                    }
                     _ => {
-                        let mut active_channels = get_channels_from_text(tokens[0]);
+                        let mut active_channels = get_channels_from_text(tokens[0].get());
                         for (i, channel) in active_channels.iter_mut().enumerate() {
                             if *channel {
-                                match tokens[1][0] {
+                                match tokens[1].get()[0] {
                                     b'0' | b'z' => {
                                         channels[i].state = ChannelState::Pause;
                                         channels[i].next_tick = 0;
@@ -365,10 +426,12 @@ fn main() -> ! {
                                     }
                                     _ => {
                                         // is other a number?
-                                        if let Ok(num) = core::str::from_utf8(&tokens[1])
-                                            .unwrap()
-                                            .trim_end()
-                                            .parse::<u16>()
+                                        if let Ok(num) = core::str::from_utf8(
+                                            &tokens[1].get()[0..tokens[1].get_size()],
+                                        )
+                                        .unwrap()
+                                        .trim_end()
+                                        .parse::<u16>()
                                         {
                                             let _ = serial.write("got a number".as_bytes());
 

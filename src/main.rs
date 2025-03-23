@@ -387,20 +387,83 @@ fn main() -> ! {
             let mut changed = true;
             while changed {
                 changed = false;
-                match tokens[0].get()[0] {
-                    b'z' | b'0' | b'r' => {
+
+                match core::str::from_utf8(&tokens[0].get()[..tokens[0].get_size()]).unwrap() {
+                    "z" | "0" | "r" => {
                         tokens[1].set(tokens[0].get());
                         tokens[0].set(all_channels_str);
                         changed = true;
                     }
-                    b'+' => {
+                    "+" => {
                         data_output_data_slot = 100.max(data_output_data_slot / 10);
                         data_output_enable_slot = 100.max(data_output_enable_slot / 10);
                     }
-                    b'-' => {
+                    "-" => {
                         data_output_data_slot = 1_000_000.min(data_output_data_slot * 10);
                         data_output_enable_slot = 1_000_000.min(data_output_enable_slot * 10);
                     }
+                    "c" => {
+                        match core::str::from_utf8(&tokens[1].get()[0..tokens[1].get_size()])
+                            .unwrap()
+                        {
+                            "sync" => {
+                                match core::str::from_utf8(
+                                    &tokens[2].get()[0..tokens[2].get_size()],
+                                )
+                                .unwrap()
+                                {
+                                    "opp" => {
+                                        let (clock1, clock2) = clocks.split_at_mut(1);
+                                        clock1[0].sync_opposite(&mut clock2[0]);
+                                    }
+                                    _ => {
+                                        let (clock1, clock2) = clocks.split_at_mut(1);
+                                        clock1[0].sync(&mut clock2[0]);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    "c1" | "c2" => {
+                        let clock_index = match tokens[0].get()[1] {
+                            b'1' => 0,
+                            b'2' => 1,
+                            _ => 0,
+                        };
+                        match core::str::from_utf8(&tokens[1].get()[0..tokens[1].get_size()])
+                            .unwrap()
+                        {
+                            "auto" => {
+                                clocks[clock_index].auto = true;
+                                clocks[clock_index].next_tick = now;
+                                clocks[clock_index].state = false;
+                            }
+
+                            "on" => {
+                                clocks[clock_index].auto = false;
+                                clocks[clock_index].state = true;
+                            }
+                            "off" => {
+                                clocks[clock_index].auto = false;
+                                clocks[clock_index].state = false;
+                            }
+                            "f" => {
+                                // is other a number?
+                                if let Ok(num) =
+                                    core::str::from_utf8(&tokens[2].get()[0..tokens[2].get_size()])
+                                        .unwrap()
+                                        .trim_end()
+                                        .parse::<u64>()
+                                {
+                                    clocks[clock_index].set_freq(num);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
                     _ => {
                         let mut active_channels = get_channels_from_text(tokens[0].get());
                         for (i, channel) in active_channels.iter_mut().enumerate() {

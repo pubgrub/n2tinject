@@ -1,6 +1,10 @@
 #![no_std]
 #![no_main]
 
+mod button;
+mod clock;
+mod string;
+
 use core::fmt::Write;
 use embedded_hal::digital::{OutputPin, StatefulOutputPin as _};
 use panic_halt as _;
@@ -14,6 +18,10 @@ use rp2040_hal::{
 };
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
+
+use button::button::Button;
+use clock::clock::Clock;
+use string::string::String;
 
 #[link_section = ".boot2"]
 #[used]
@@ -45,58 +53,13 @@ impl Write for Buffer {
     }
 }
 
-mod string {
-    use core::u8;
-
-    pub struct String {
-        buf: [u8; 64],
-        size: usize,
-    }
-    impl String {
-        pub fn new(data: [u8; 64]) -> Self {
-            String {
-                buf: data,
-                size: String::calc_size(data),
-            }
-        }
-
-        pub fn get(&self) -> [u8; 64] {
-            self.buf
-        }
-        pub fn get_size(&self) -> usize {
-            self.size
-        }
-
-        pub fn set(&mut self, data: [u8; 64]) -> () {
-            self.buf = data;
-            self.size = String::calc_size(data);
-        }
-
-        fn calc_size(data: [u8; 64]) -> usize {
-            let mut size = 0;
-            for i in 0..64 {
-                if data[i] == 0 {
-                    break;
-                }
-                size += 1;
-            }
-            size
-        }
-
-        pub fn clear(&mut self) {
-            self.buf = [0; 64];
-            self.size = 0;
-        }
-
-        fn as_str(&self) -> &str {
-            core::str::from_utf8(&self.buf[0..self.size]).unwrap()
-        }
-    }
+fn u64_to_str(n: u64) -> Buffer {
+    let mut buf = Buffer::new();
+    write!(&mut buf, "{}", n).unwrap();
+    buf
 }
 
-use string::String;
-
-fn u64_to_str(n: u64) -> Buffer {
+fn u8_to_str(n: u8) -> Buffer {
     let mut buf = Buffer::new();
     write!(&mut buf, "{}", n).unwrap();
     buf
@@ -159,7 +122,7 @@ fn main() -> ! {
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
 
     // Initialisiere Systemtakt
-    let clocks = init_clocks_and_plls(
+    let sys_clocks = init_clocks_and_plls(
         12_000_000u32,
         pac.XOSC,
         pac.CLOCKS,
@@ -170,7 +133,7 @@ fn main() -> ! {
     )
     .unwrap();
 
-    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &sys_clocks);
 
     let sio = Sio::new(pac.SIO);
     let pins = rp2040_hal::gpio::Pins::new(
@@ -184,7 +147,7 @@ fn main() -> ! {
     let usb_bus = UsbBusAllocator::new(rp2040_hal::usb::UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
-        clocks.usb_clock,
+        sys_clocks.usb_clock,
         true,
         &mut pac.RESETS,
     ));
@@ -197,8 +160,10 @@ fn main() -> ! {
         .device_class(USB_CLASS_CDC)
         .build();
 
+    // On-Board blinking LED
     let mut blink_pin = pins.gpio25.into_push_pull_output_in_state(PinState::High);
 
+    // Data Output Pins Channels 1 - 4
     let pin_14 = pins
         .gpio14
         .into_push_pull_output_in_state(PinState::Low)
@@ -229,6 +194,20 @@ fn main() -> ! {
         .into_dyn_pin();
     let pin_21 = pins
         .gpio21
+        .into_push_pull_output_in_state(PinState::Low)
+        .into_dyn_pin();
+
+    // Clock Button Pins
+    let pin_12 = pins.gpio12.into_pull_down_input().into_dyn_pin();
+    let pin_13 = pins.gpio13.into_pull_down_input().into_dyn_pin();
+
+    // Clock Pulse Output Pins
+    let pin_10 = pins
+        .gpio10
+        .into_push_pull_output_in_state(PinState::Low)
+        .into_dyn_pin();
+    let pin_11 = pins
+        .gpio11
         .into_push_pull_output_in_state(PinState::Low)
         .into_dyn_pin();
 
@@ -297,8 +276,8 @@ fn main() -> ! {
     let blink_interval = 1_000_000u64;
     let mut blink_last = 0u64;
 
-    let mut t1 = 10_000u64; // time from data out to enable on and from enable off to end of cycle
-    let mut t2 = 10_000u64; // time from enable on to enable off
+    let mut data_output_data_slot = 10_000u64; // time from data out to enable on and from enable off to end of cycle
+    let mut data_output_enable_slot = 10_000u64; // time from enable on to enable off
 
     let mut now;
 
@@ -308,6 +287,16 @@ fn main() -> ! {
     for i in 0..CHANNELS {
         all_channels_str[i] = (i as u8 + 1) + 0x30;
     }
+
+    let mut button1 = Button::new(pin_12);
+    let mut button2 = Button::new(pin_13);
+
+    let mut buttons = [&mut button1, &mut button2];
+
+    let mut clock1 = Clock::new(pin_10, button1);
+    let mut clock2 = Clock::new(pin_11, button2);
+
+    let mut clocks = [&mut clock1, &mut clock2];
 
     //test data
     channels[0].data = 0b1111011101101;
@@ -345,28 +334,28 @@ fn main() -> ! {
                             channel.data_pin.set_low().unwrap();
                         }
                         channel.bit += 1;
-                        channel.next_tick = now + t1;
+                        channel.next_tick = now + data_output_data_slot;
                         channel.state = ChannelState::DataSet;
                     }
                 }
                 ChannelState::DataSet => {
                     if now > channel.next_tick {
                         channel.enable_pin.set_high().unwrap();
-                        channel.next_tick = now + t2;
+                        channel.next_tick = now + data_output_enable_slot;
                         channel.state = ChannelState::EnableSet;
                     }
                 }
                 ChannelState::EnableSet => {
                     if now > channel.next_tick {
                         channel.enable_pin.set_low().unwrap();
-                        channel.next_tick = now + t2;
+                        channel.next_tick = now + data_output_enable_slot;
                         if channel.bit < 16 {
                             channel.state = ChannelState::Pause;
                         } else {
                             if channel.last == false {
                                 channel.last = true;
                                 channel.bit = 15;
-                                channel.next_tick = now + t1;
+                                channel.next_tick = now + data_output_data_slot;
                                 channel.state = ChannelState::Pause;
                             } else {
                                 channel.state = ChannelState::Idle;
@@ -376,6 +365,11 @@ fn main() -> ! {
                     }
                 }
             }
+        }
+
+        // handle clocks
+        for (clock) in clocks.iter_mut() {
+            clock.update(now);
         }
 
         // handle USB communication
@@ -400,12 +394,12 @@ fn main() -> ! {
                         changed = true;
                     }
                     b'+' => {
-                        t1 = 100.max(t1 / 10);
-                        t2 = 100.max(t2 / 10);
+                        data_output_data_slot = 100.max(data_output_data_slot / 10);
+                        data_output_enable_slot = 100.max(data_output_enable_slot / 10);
                     }
                     b'-' => {
-                        t1 = 1_000_000.min(t1 * 10);
-                        t2 = 1_000_000.min(t2 * 10);
+                        data_output_data_slot = 1_000_000.min(data_output_data_slot * 10);
+                        data_output_enable_slot = 1_000_000.min(data_output_enable_slot * 10);
                     }
                     _ => {
                         let mut active_channels = get_channels_from_text(tokens[0].get());

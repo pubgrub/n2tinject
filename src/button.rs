@@ -1,8 +1,8 @@
 pub mod button {
 
-    use embedded_hal::digital::{InputPin, OutputPin, StatefulOutputPin};
+    use embedded_hal::digital::InputPin;
     use panic_halt as _;
-    use rp2040_hal::gpio::{AsInputPin, DynPinId, FunctionSioInput, Pin, PullDown};
+    use rp2040_hal::gpio::{DynPinId, FunctionSioInput, Pin, PullDown};
 
     pub struct Button {
         pin: Pin<DynPinId, FunctionSioInput, PullDown>,

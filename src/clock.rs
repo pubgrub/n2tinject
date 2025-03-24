@@ -3,9 +3,9 @@ pub mod clock {
     static SYS_TICKS: u64 = 1_000_000;
 
     use crate::button::button::Button;
-    use embedded_hal::digital::{InputPin, OutputPin, StatefulOutputPin};
+    use embedded_hal::digital::OutputPin;
     use panic_halt as _;
-    use rp2040_hal::gpio::{AsInputPin, DynPinId, FunctionSioOutput, Pin, PullDown};
+    use rp2040_hal::gpio::{DynPinId, FunctionSioOutput, Pin, PullDown};
 
     pub struct Clock {
         pin: Pin<DynPinId, FunctionSioOutput, PullDown>,

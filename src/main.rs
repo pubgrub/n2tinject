@@ -3,6 +3,7 @@
 
 mod button;
 mod clock;
+mod input_channel;
 mod string;
 
 use core::fmt::Write;
@@ -11,7 +12,7 @@ use panic_halt as _;
 use rp2040_hal::{
     clocks::init_clocks_and_plls,
     gpio::{DynPinId, FunctionSioOutput, Pin, PinState, PullDown},
-    pac::{self, dma::ch},
+    pac,
     sio::Sio,
     watchdog::Watchdog,
     Timer,
@@ -21,13 +22,14 @@ use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 use button::button::Button;
 use clock::clock::Clock;
+use input_channel::input_channel::InputChannel;
 use string::string::String;
 
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
-static CHANNELS: usize = 4;
+static OUTPUT_CHANNELS: usize = 4;
 
 struct Buffer {
     buf: [u8; 20],
@@ -65,11 +67,10 @@ fn u8_to_str(n: u8) -> Buffer {
     buf
 }
 
-fn setup_systick(syst: &mut pac::SYST, reload_value: u32) {
-    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
-    syst.set_reload(reload_value); // Must be ≤ 0xFFFFFF (2^24 - 1)
-    syst.clear_current(); // Reset counter
-    syst.enable_counter(); // Start counting
+fn u16_to_str(n: u16) -> Buffer {
+    let mut buf = Buffer::new();
+    write!(&mut buf, "{}", n).unwrap();
+    buf
 }
 
 fn tokenize(input: [u8; 64]) -> [String; 4] {
@@ -103,11 +104,11 @@ fn tokenize(input: [u8; 64]) -> [String; 4] {
     tokens
 }
 
-fn get_channels_from_text(text: [u8; 64]) -> [bool; CHANNELS] {
-    let mut channels: [bool; CHANNELS] = [false; CHANNELS];
+fn get_channels_from_text(text: [u8; 64]) -> [bool; OUTPUT_CHANNELS] {
+    let mut channels: [bool; OUTPUT_CHANNELS] = [false; OUTPUT_CHANNELS];
     for &t in text.iter() {
         if let Some(channel) = (t as char).to_digit(10) {
-            if channel >= 1 && channel <= CHANNELS as u32 {
+            if channel >= 1 && channel <= OUTPUT_CHANNELS as u32 {
                 channels[channel as usize - 1] = true;
             }
         }
@@ -118,7 +119,6 @@ fn get_channels_from_text(text: [u8; 64]) -> [bool; CHANNELS] {
 #[rp2040_hal::entry]
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
 
     // Initialisiere Systemtakt
@@ -211,17 +211,32 @@ fn main() -> ! {
         .into_push_pull_output_in_state(PinState::Low)
         .into_dyn_pin();
 
-    enum ChannelState {
+    // Input Channel Pins
+    let pin_6 = pins
+        .gpio6
+        .into_push_pull_output_in_state(PinState::Low)
+        .into_dyn_pin();
+    let pin_8 = pins
+        .gpio8
+        .into_push_pull_output_in_state(PinState::Low)
+        .into_dyn_pin();
+    let pin_9 = pins
+        .gpio9
+        .into_push_pull_output_in_state(PinState::Low)
+        .into_dyn_pin();
+    let pin_7 = pins.gpio7.into_pull_down_input().into_dyn_pin();
+
+    enum OutputChannelState {
         Idle,
         DataSet,
         EnableSet,
         Pause,
     }
 
-    struct Channel {
+    struct OutputChannel {
         data_pin: Pin<DynPinId, FunctionSioOutput, PullDown>, // data pin
         enable_pin: Pin<DynPinId, FunctionSioOutput, PullDown>, // enable pin
-        state: ChannelState,                                  // state of channel
+        state: OutputChannelState,                            // state of channel
         data: u16,                                            // number to output
         bit: u8,                                              // current bit
         next_tick: u64,                                       // next tick to output
@@ -229,40 +244,40 @@ fn main() -> ! {
         last: bool, // double output last bit to trigger last shift
     }
 
-    let mut channel1 = Channel {
+    let mut output_channel_1 = OutputChannel {
         data_pin: pin_14,
         enable_pin: pin_15,
-        state: ChannelState::Idle,
+        state: OutputChannelState::Idle,
         data: 0,
         bit: 0,
         next_tick: 0,
         reverse: false,
         last: false,
     };
-    let mut channel2 = Channel {
+    let mut output_channel_2 = OutputChannel {
         data_pin: pin_16,
         enable_pin: pin_17,
-        state: ChannelState::Idle,
+        state: OutputChannelState::Idle,
         data: 0,
         bit: 0,
         next_tick: 0,
         reverse: false,
         last: false,
     };
-    let mut channel3 = Channel {
+    let mut output_channel_3 = OutputChannel {
         data_pin: pin_18,
         enable_pin: pin_19,
-        state: ChannelState::Idle,
+        state: OutputChannelState::Idle,
         data: 0,
         bit: 0,
         next_tick: 0,
         reverse: false,
         last: false,
     };
-    let mut channel4 = Channel {
+    let mut output_channel_4 = OutputChannel {
         data_pin: pin_20,
         enable_pin: pin_21,
-        state: ChannelState::Idle,
+        state: OutputChannelState::Idle,
         data: 0,
         bit: 0,
         next_tick: 0,
@@ -270,8 +285,12 @@ fn main() -> ! {
         last: false,
     };
 
-    let mut channels: [&mut Channel; CHANNELS] =
-        [&mut channel1, &mut channel2, &mut channel3, &mut channel4];
+    let mut output_channels: [&mut OutputChannel; OUTPUT_CHANNELS] = [
+        &mut output_channel_1,
+        &mut output_channel_2,
+        &mut output_channel_3,
+        &mut output_channel_4,
+    ];
 
     let blink_interval = 1_000_000u64;
     let mut blink_last = 0u64;
@@ -284,26 +303,26 @@ fn main() -> ! {
     let answer_str = "Answer:".as_bytes();
     let empty_command = [0u8; 64];
     let mut all_channels_str = empty_command;
-    for i in 0..CHANNELS {
+    for i in 0..OUTPUT_CHANNELS {
         all_channels_str[i] = (i as u8 + 1) + 0x30;
     }
 
-    let mut button1 = Button::new(pin_12);
-    let mut button2 = Button::new(pin_13);
-
-    let mut buttons = [&mut button1, &mut button2];
+    let button1 = Button::new(pin_12);
+    let button2 = Button::new(pin_13);
 
     let mut clock1 = Clock::new(pin_10, button1);
     let mut clock2 = Clock::new(pin_11, button2);
 
     let mut clocks = [&mut clock1, &mut clock2];
 
+    let mut input_channel = InputChannel::new(pin_6, pin_8, pin_9, pin_7);
+
     //test data
-    channels[0].data = 0b1111011101101;
-    channels[0].state = ChannelState::Pause;
-    channels[0].next_tick = 0;
-    channels[0].bit = 0;
-    channels[0].reverse = true;
+    output_channels[0].data = 0b1111011101101;
+    output_channels[0].state = OutputChannelState::Pause;
+    output_channels[0].next_tick = 0;
+    output_channels[0].bit = 0;
+    output_channels[0].reverse = true;
 
     loop {
         now = timer.get_counter().ticks();
@@ -315,12 +334,12 @@ fn main() -> ! {
         }
 
         // handle output channels
-        for channel in channels.iter_mut() {
+        for channel in output_channels.iter_mut() {
             match channel.state {
-                ChannelState::Idle => {
+                OutputChannelState::Idle => {
                     // do nothing
                 }
-                ChannelState::Pause => {
+                OutputChannelState::Pause => {
                     if now > channel.next_tick {
                         let test_bit;
                         if channel.reverse {
@@ -335,30 +354,30 @@ fn main() -> ! {
                         }
                         channel.bit += 1;
                         channel.next_tick = now + data_output_data_slot;
-                        channel.state = ChannelState::DataSet;
+                        channel.state = OutputChannelState::DataSet;
                     }
                 }
-                ChannelState::DataSet => {
+                OutputChannelState::DataSet => {
                     if now > channel.next_tick {
                         channel.enable_pin.set_high().unwrap();
                         channel.next_tick = now + data_output_enable_slot;
-                        channel.state = ChannelState::EnableSet;
+                        channel.state = OutputChannelState::EnableSet;
                     }
                 }
-                ChannelState::EnableSet => {
+                OutputChannelState::EnableSet => {
                     if now > channel.next_tick {
                         channel.enable_pin.set_low().unwrap();
                         channel.next_tick = now + data_output_enable_slot;
                         if channel.bit < 16 {
-                            channel.state = ChannelState::Pause;
+                            channel.state = OutputChannelState::Pause;
                         } else {
                             if channel.last == false {
                                 channel.last = true;
                                 channel.bit = 15;
                                 channel.next_tick = now + data_output_data_slot;
-                                channel.state = ChannelState::Pause;
+                                channel.state = OutputChannelState::Pause;
                             } else {
-                                channel.state = ChannelState::Idle;
+                                channel.state = OutputChannelState::Idle;
                                 channel.last = false;
                             }
                         }
@@ -368,7 +387,7 @@ fn main() -> ! {
         }
 
         // handle clocks
-        for (clock) in clocks.iter_mut() {
+        for clock in clocks.iter_mut() {
             clock.update(now);
         }
 
@@ -376,6 +395,31 @@ fn main() -> ! {
         if !usb_dev.poll(&mut [&mut serial]) {
             //            debug!("waiting...");
             continue;
+        }
+
+        // handle input channel
+        input_channel.update(now);
+        let _ = serial.write(&u16_to_str(input_channel.data).buf);
+        // match input_channel.state {
+        //     input_channel::input_channel::InputChannelState::Idle => {
+        //         let _ = serial.write("Idle ".as_bytes());
+        //     }
+        //     input_channel::input_channel::InputChannelState::LoadingData => {
+        //         let _ = serial.write("Loading Data ".as_bytes());
+        //     }
+        //     input_channel::input_channel::InputChannelState::SerialShiftOff => {
+        //         let _ = serial.write("SerialShiftOff ".as_bytes());
+        //     }
+        //     input_channel::input_channel::InputChannelState::ShiftClockOn => {
+        //         let _ = serial.write("SerialShift On ".as_bytes());
+        //     }
+        // }
+        let _ = serial.write(&u16_to_str(input_channel.data).buf);
+        if input_channel.data_changed {
+            let data = input_channel.data;
+            let data_str = u16_to_str(data);
+            let _ = serial.write(&data_str.buf);
+            input_channel.data_changed = false;
         }
 
         let mut buf = [b' '; 64];
@@ -470,16 +514,16 @@ fn main() -> ! {
                             if *channel {
                                 match tokens[1].get()[0] {
                                     b'0' | b'z' => {
-                                        channels[i].state = ChannelState::Pause;
-                                        channels[i].next_tick = 0;
-                                        channels[i].bit = 0;
-                                        channels[i].data = 0;
+                                        output_channels[i].state = OutputChannelState::Pause;
+                                        output_channels[i].next_tick = 0;
+                                        output_channels[i].bit = 0;
+                                        output_channels[i].data = 0;
                                     }
                                     b'r' => {
-                                        channels[i].state = ChannelState::Pause;
-                                        channels[i].next_tick = 0;
-                                        channels[i].bit = 0;
-                                        channels[i].reverse = !channels[i].reverse;
+                                        output_channels[i].state = OutputChannelState::Pause;
+                                        output_channels[i].next_tick = 0;
+                                        output_channels[i].bit = 0;
+                                        output_channels[i].reverse = !output_channels[i].reverse;
                                     }
                                     _ => {
                                         // is other a number?
@@ -492,10 +536,10 @@ fn main() -> ! {
                                         {
                                             let _ = serial.write("got a number".as_bytes());
 
-                                            channels[i].data = num;
-                                            channels[i].state = ChannelState::Pause;
-                                            channels[i].next_tick = 0;
-                                            channels[i].bit = 0;
+                                            output_channels[i].data = num;
+                                            output_channels[i].state = OutputChannelState::Pause;
+                                            output_channels[i].next_tick = 0;
+                                            output_channels[i].bit = 0;
                                         } else {
                                             let _ = serial.write("got something else".as_bytes());
                                         }

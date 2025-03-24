@@ -35,14 +35,5 @@ pub mod string {
             }
             size
         }
-
-        pub fn clear(&mut self) {
-            self.buf = [0; 64];
-            self.size = 0;
-        }
-
-        fn as_str(&self) -> &str {
-            core::str::from_utf8(&self.buf[0..self.size]).unwrap()
-        }
     }
 }

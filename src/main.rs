@@ -391,35 +391,22 @@ fn main() -> ! {
             clock.update(now);
         }
 
-        // handle USB communication
-        if !usb_dev.poll(&mut [&mut serial]) {
-            //            debug!("waiting...");
-            continue;
-        }
-
         // handle input channel
         input_channel.update(now);
         let _ = serial.write(&u16_to_str(input_channel.data).buf);
-        // match input_channel.state {
-        //     input_channel::input_channel::InputChannelState::Idle => {
-        //         let _ = serial.write("Idle ".as_bytes());
-        //     }
-        //     input_channel::input_channel::InputChannelState::LoadingData => {
-        //         let _ = serial.write("Loading Data ".as_bytes());
-        //     }
-        //     input_channel::input_channel::InputChannelState::SerialShiftOff => {
-        //         let _ = serial.write("SerialShiftOff ".as_bytes());
-        //     }
-        //     input_channel::input_channel::InputChannelState::ShiftClockOn => {
-        //         let _ = serial.write("SerialShift On ".as_bytes());
-        //     }
-        // }
+
         let _ = serial.write(&u16_to_str(input_channel.data).buf);
         if input_channel.data_changed {
             let data = input_channel.data;
             let data_str = u16_to_str(data);
             let _ = serial.write(&data_str.buf);
             input_channel.data_changed = false;
+        }
+
+        // handle USB communication
+        if !usb_dev.poll(&mut [&mut serial]) {
+            //            debug!("waiting...");
+            continue;
         }
 
         let mut buf = [b' '; 64];
@@ -456,10 +443,12 @@ fn main() -> ! {
                                 )
                                 .unwrap()
                                 {
+                                    // c sync opp
                                     "opp" => {
                                         let (clock1, clock2) = clocks.split_at_mut(1);
                                         clock1[0].sync_opposite(&mut clock2[0]);
                                     }
+                                    // c sync
                                     _ => {
                                         let (clock1, clock2) = clocks.split_at_mut(1);
                                         clock1[0].sync(&mut clock2[0]);
@@ -479,20 +468,23 @@ fn main() -> ! {
                         match core::str::from_utf8(&tokens[1].get()[0..tokens[1].get_size()])
                             .unwrap()
                         {
+                            // cx auto
                             "auto" => {
                                 clocks[clock_index].auto = true;
                                 clocks[clock_index].next_tick = now;
                                 clocks[clock_index].state = false;
                             }
-
+                            // cx on
                             "on" => {
                                 clocks[clock_index].auto = false;
                                 clocks[clock_index].state = true;
                             }
+                            // cx off
                             "off" => {
                                 clocks[clock_index].auto = false;
                                 clocks[clock_index].state = false;
                             }
+                            // cx f y
                             "f" => {
                                 // is other a number?
                                 if let Ok(num) =
@@ -513,18 +505,21 @@ fn main() -> ! {
                         for (i, channel) in active_channels.iter_mut().enumerate() {
                             if *channel {
                                 match tokens[1].get()[0] {
-                                    b'0' | b'z' => {
+                                    // x 0
+                                    b'0' => {
                                         output_channels[i].state = OutputChannelState::Pause;
                                         output_channels[i].next_tick = 0;
                                         output_channels[i].bit = 0;
                                         output_channels[i].data = 0;
                                     }
+                                    // x r
                                     b'r' => {
                                         output_channels[i].state = OutputChannelState::Pause;
                                         output_channels[i].next_tick = 0;
                                         output_channels[i].bit = 0;
                                         output_channels[i].reverse = !output_channels[i].reverse;
                                     }
+                                    // x y
                                     _ => {
                                         // is other a number?
                                         if let Ok(num) = core::str::from_utf8(

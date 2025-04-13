@@ -3,12 +3,22 @@
 
 mod button;
 mod clock;
+mod format_str;
 mod input_channel;
-mod string;
+mod output_channel;
+mod program;
+//mod string;
 
-use core::fmt::Write;
+use format_str::format_str::{DataText, ScrollText, StaticPageText};
+
+use core::str;
+use core::{fmt::Write, str::FromStr};
+use dyn_fmt;
 use embedded_hal::digital::{OutputPin, StatefulOutputPin as _};
+use heapless::{String, Vec};
 use panic_halt as _;
+use rand_chacha::ChaCha8Rng;
+use rand_core::{RngCore, SeedableRng};
 use rp2040_hal::{
     clocks::init_clocks_and_plls,
     gpio::{DynPinId, FunctionSioOutput, Pin, PinState, PullDown},
@@ -23,7 +33,12 @@ use usbd_serial::{SerialPort, USB_CLASS_CDC};
 use button::button::Button;
 use clock::clock::Clock;
 use input_channel::input_channel::InputChannel;
-use string::string::String;
+use output_channel::output_channel::OutputChannel;
+use program::program::Program;
+//use string::string::String;
+
+const PAGE_LINES: usize = format_str::format_str::PAGE_LINES;
+const PAGE_STR_WIDTH: usize = format_str::format_str::PAGE_STR_WIDTH;
 
 #[link_section = ".boot2"]
 #[used]
@@ -73,40 +88,21 @@ fn u16_to_str(n: u16) -> Buffer {
     buf
 }
 
-fn tokenize(input: [u8; 64]) -> [String; 4] {
-    let mut tokens: [String; 4] = [
-        String::new([0; 64]),
-        String::new([0; 64]),
-        String::new([0; 64]),
-        String::new([0; 64]),
-    ];
-    let mut token: [u8; 64] = [0u8; 64];
-    let mut token_index = 0;
-    let mut token_count = 0;
-    for i in 0..64 {
-        if input[i] == 0 {
-            break;
-        }
-        if input[i] == 0x20 {
-            if token_index == 0 {
-                continue;
-            }
-            tokens[token_count].set(token);
-            token = [0; 64];
-            token_index = 0;
-            token_count += 1;
-        } else {
-            token[token_index] = input[i];
-            token_index += 1;
+fn tokenize(input: String<PAGE_STR_WIDTH>) -> Vec<String<PAGE_STR_WIDTH>, 4> {
+    let mut tokens: Vec<String<PAGE_STR_WIDTH>, 4> = Vec::new();
+    for i in input.split(" ") {
+        if i.len() > 0 {
+            let mut token = String::new();
+            token.push_str(i);
+            tokens.push(token).unwrap();
         }
     }
-    tokens[token_count].set(token);
     tokens
 }
 
-fn get_channels_from_text(text: [u8; 64]) -> [bool; OUTPUT_CHANNELS] {
+fn get_channels_from_text(text: &String<PAGE_STR_WIDTH>) -> [bool; OUTPUT_CHANNELS] {
     let mut channels: [bool; OUTPUT_CHANNELS] = [false; OUTPUT_CHANNELS];
-    for &t in text.iter() {
+    for &t in text.as_bytes() {
         if let Some(channel) = (t as char).to_digit(10) {
             if channel >= 1 && channel <= OUTPUT_CHANNELS as u32 {
                 channels[channel as usize - 1] = true;
@@ -121,7 +117,7 @@ fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
 
-    // Initialisiere Systemtakt
+    // Initialise System Clock
     let sys_clocks = init_clocks_and_plls(
         12_000_000u32,
         pac.XOSC,
@@ -226,103 +222,64 @@ fn main() -> ! {
         .into_dyn_pin();
     let pin_7 = pins.gpio7.into_pull_down_input().into_dyn_pin();
 
-    enum OutputChannelState {
-        Idle,
-        DataSet,
-        EnableSet,
-        Pause,
-    }
+    //setup output channels
+    let output_channel_1 = OutputChannel::new(pin_14, pin_15);
+    let output_channel_2 = OutputChannel::new(pin_16, pin_17);
+    let output_channel_3 = OutputChannel::new(pin_18, pin_19);
+    let output_channel_4 = OutputChannel::new(pin_20, pin_21);
 
-    struct OutputChannel {
-        data_pin: Pin<DynPinId, FunctionSioOutput, PullDown>, // data pin
-        enable_pin: Pin<DynPinId, FunctionSioOutput, PullDown>, // enable pin
-        state: OutputChannelState,                            // state of channel
-        data: u16,                                            // number to output
-        bit: u8,                                              // current bit
-        next_tick: u64,                                       // next tick to output
-        reverse: bool,                                        // reverse output bits
-        last: bool, // double output last bit to trigger last shift
-    }
-
-    let mut output_channel_1 = OutputChannel {
-        data_pin: pin_14,
-        enable_pin: pin_15,
-        state: OutputChannelState::Idle,
-        data: 0,
-        bit: 0,
-        next_tick: 0,
-        reverse: false,
-        last: false,
-    };
-    let mut output_channel_2 = OutputChannel {
-        data_pin: pin_16,
-        enable_pin: pin_17,
-        state: OutputChannelState::Idle,
-        data: 0,
-        bit: 0,
-        next_tick: 0,
-        reverse: false,
-        last: false,
-    };
-    let mut output_channel_3 = OutputChannel {
-        data_pin: pin_18,
-        enable_pin: pin_19,
-        state: OutputChannelState::Idle,
-        data: 0,
-        bit: 0,
-        next_tick: 0,
-        reverse: false,
-        last: false,
-    };
-    let mut output_channel_4 = OutputChannel {
-        data_pin: pin_20,
-        enable_pin: pin_21,
-        state: OutputChannelState::Idle,
-        data: 0,
-        bit: 0,
-        next_tick: 0,
-        reverse: false,
-        last: false,
-    };
-
-    let mut output_channels: [&mut OutputChannel; OUTPUT_CHANNELS] = [
-        &mut output_channel_1,
-        &mut output_channel_2,
-        &mut output_channel_3,
-        &mut output_channel_4,
+    let mut output_channels: [OutputChannel; OUTPUT_CHANNELS] = [
+        output_channel_1,
+        output_channel_2,
+        output_channel_3,
+        output_channel_4,
     ];
 
     let blink_interval = 1_000_000u64;
     let mut blink_last = 0u64;
 
-    let mut data_output_data_slot = 10_000u64; // time from data out to enable on and from enable off to end of cycle
-    let mut data_output_enable_slot = 10_000u64; // time from enable on to enable off
-
     let mut now;
 
     let answer_str = "Answer:".as_bytes();
-    let empty_command = [0u8; 64];
-    let mut all_channels_str = empty_command;
+    let mut all_channels_str = String::new();
     for i in 0..OUTPUT_CHANNELS {
-        all_channels_str[i] = (i as u8 + 1) + 0x30;
+        all_channels_str
+            .push(((i as u8 + 1) + 0x30) as char)
+            .unwrap();
     }
 
+    // setup buttons
     let button1 = Button::new(pin_12);
     let button2 = Button::new(pin_13);
 
+    // setup clocks
     let mut clock1 = Clock::new(pin_10, button1);
     let mut clock2 = Clock::new(pin_11, button2);
 
     let mut clocks = [&mut clock1, &mut clock2];
 
+    // setup input channel
     let mut input_channel = InputChannel::new(pin_6, pin_8, pin_9, pin_7);
 
-    //test data
-    output_channels[0].data = 0b1111011101101;
-    output_channels[0].state = OutputChannelState::Pause;
-    output_channels[0].next_tick = 0;
-    output_channels[0].bit = 0;
-    output_channels[0].reverse = true;
+    // setup programs
+    // Program 0 is special, will be caught by the main loop
+    const PROGRAMS: usize = 6;
+    let program00 = Program::new(String::from_str("Manual").unwrap(), 0, [0, 0]);
+    let program01 = Program::new(String::from_str("Sync").unwrap(), 3, [0b011, 0b011]);
+    let program02 = Program::new(String::from_str("Opp Sync").unwrap(), 5, [0b01100, 0b00011]);
+    let program03 = Program::new(String::from_str("Inner").unwrap(), 5, [0b01111, 0b00110]);
+    let program04 = Program::new(String::from_str("Overlap").unwrap(), 4, [0b0110, 0b0011]);
+    let program05 = Program::new(
+        String::from_str("Sequential").unwrap(),
+        6,
+        [0b011000, 0b000011],
+    );
+
+    let mut programs: [Program; PROGRAMS] = [
+        program00, program01, program02, program03, program04, program05,
+    ];
+
+    let mut active_program = 0;
 
     loop {
         now = timer.get_counter().ticks();
@@ -335,55 +292,7 @@ fn main() -> ! {
 
         // handle output channels
         for channel in output_channels.iter_mut() {
-            match channel.state {
-                OutputChannelState::Idle => {
-                    // do nothing
-                }
-                OutputChannelState::Pause => {
-                    if now > channel.next_tick {
-                        let test_bit;
-                        if channel.reverse {
-                            test_bit = 1 << (15 - channel.bit);
-                        } else {
-                            test_bit = 1 << channel.bit;
-                        }
-                        if channel.data & test_bit != 0 {
-                            channel.data_pin.set_high().unwrap();
-                        } else {
-                            channel.data_pin.set_low().unwrap();
-                        }
-                        channel.bit += 1;
-                        channel.next_tick = now + data_output_data_slot;
-                        channel.state = OutputChannelState::DataSet;
-                    }
-                }
-                OutputChannelState::DataSet => {
-                    if now > channel.next_tick {
-                        channel.enable_pin.set_high().unwrap();
-                        channel.next_tick = now + data_output_enable_slot;
-                        channel.state = OutputChannelState::EnableSet;
-                    }
-                }
-                OutputChannelState::EnableSet => {
-                    if now > channel.next_tick {
-                        channel.enable_pin.set_low().unwrap();
-                        channel.next_tick = now + data_output_enable_slot;
-                        if channel.bit < 16 {
-                            channel.state = OutputChannelState::Pause;
-                        } else {
-                            if channel.last == false {
-                                channel.last = true;
-                                channel.bit = 15;
-                                channel.next_tick = now + data_output_data_slot;
-                                channel.state = OutputChannelState::Pause;
-                            } else {
-                                channel.state = OutputChannelState::Idle;
-                                channel.last = false;
-                            }
-                        }
-                    }
-                }
-            }
+            channel.update(now);
         }
 
         // handle clocks
@@ -409,40 +318,35 @@ fn main() -> ! {
             continue;
         }
 
+        // get keyboard input
         let mut buf = [b' '; 64];
 
+        // Handle Input
+        //
+        // any input found?
         if let Ok(count) = serial.read(&mut buf) {
-            // Echo zurücksenden
+            let mut input_str: String<PAGE_STR_WIDTH> = String::new();
+            for i in 0..count {
+                input_str.push(buf[i] as char).unwrap();
+            }
 
-            let mut tokens = tokenize(buf); // split input into tokens
+            let mut tokens = tokenize(input_str); // split input into tokens
             let mut changed = true;
             while changed {
                 changed = false;
 
-                match core::str::from_utf8(&tokens[0].get()[..tokens[0].get_size()]).unwrap() {
+                match tokens[0].as_str() {
+                    // for all channels
                     "z" | "0" | "r" => {
-                        tokens[1].set(tokens[0].get());
-                        tokens[0].set(all_channels_str);
+                        tokens[1] = tokens[0].clone();
+                        tokens[0] = all_channels_str.clone();
                         changed = true;
                     }
-                    "+" => {
-                        data_output_data_slot = 100.max(data_output_data_slot / 10);
-                        data_output_enable_slot = 100.max(data_output_enable_slot / 10);
-                    }
-                    "-" => {
-                        data_output_data_slot = 1_000_000.min(data_output_data_slot * 10);
-                        data_output_enable_slot = 1_000_000.min(data_output_enable_slot * 10);
-                    }
+
                     "c" => {
-                        match core::str::from_utf8(&tokens[1].get()[0..tokens[1].get_size()])
-                            .unwrap()
-                        {
+                        match tokens[1].as_str() {
                             "sync" => {
-                                match core::str::from_utf8(
-                                    &tokens[2].get()[0..tokens[2].get_size()],
-                                )
-                                .unwrap()
-                                {
+                                match tokens[2].as_str() {
                                     // c sync opp
                                     "opp" => {
                                         let (clock1, clock2) = clocks.split_at_mut(1);
@@ -460,14 +364,12 @@ fn main() -> ! {
                     }
 
                     "c1" | "c2" => {
-                        let clock_index = match tokens[0].get()[1] {
-                            b'1' => 0,
-                            b'2' => 1,
+                        let clock_index = match tokens[0].as_str() {
+                            "c1" => 0,
+                            "c2" => 1,
                             _ => 0,
                         };
-                        match core::str::from_utf8(&tokens[1].get()[0..tokens[1].get_size()])
-                            .unwrap()
-                        {
+                        match tokens[1].as_str() {
                             // cx auto
                             "auto" => {
                                 clocks[clock_index].auto = true;
@@ -487,54 +389,41 @@ fn main() -> ! {
                             // cx f y
                             "f" => {
                                 // is other a number?
-                                if let Ok(num) =
-                                    core::str::from_utf8(&tokens[2].get()[0..tokens[2].get_size()])
-                                        .unwrap()
-                                        .trim_end()
-                                        .parse::<u64>()
-                                {
+                                if let Ok(num) = &tokens[2].trim_end().parse::<u64>() {
                                     clocks[clock_index].set_freq(num);
                                 }
                             }
                             _ => {}
                         }
                     }
+                    "p" => {
+                        // p x
+                        if let Ok(num) = &tokens[1].trim_end().parse::<u8>() {
+                            if *num > PROGRAMS as u8 {
+                            } else {
+                                active_program = *num as usize;
+                            }
+                        }
+                    }
 
+                    // starts with channel numbers
                     _ => {
-                        let mut active_channels = get_channels_from_text(tokens[0].get());
+                        let mut active_channels = get_channels_from_text(&tokens[0]);
                         for (i, channel) in active_channels.iter_mut().enumerate() {
                             if *channel {
-                                match tokens[1].get()[0] {
-                                    // x 0
-                                    b'0' => {
-                                        output_channels[i].state = OutputChannelState::Pause;
-                                        output_channels[i].next_tick = 0;
-                                        output_channels[i].bit = 0;
-                                        output_channels[i].data = 0;
-                                    }
+                                match tokens[1].as_str() {
+                                    // reverse bit order
                                     // x r
-                                    b'r' => {
-                                        output_channels[i].state = OutputChannelState::Pause;
-                                        output_channels[i].next_tick = 0;
-                                        output_channels[i].bit = 0;
-                                        output_channels[i].reverse = !output_channels[i].reverse;
+                                    "r" => {
+                                        output_channels[i].reverse();
                                     }
                                     // x y
                                     _ => {
                                         // is other a number?
-                                        if let Ok(num) = core::str::from_utf8(
-                                            &tokens[1].get()[0..tokens[1].get_size()],
-                                        )
-                                        .unwrap()
-                                        .trim_end()
-                                        .parse::<u16>()
-                                        {
+                                        if let Ok(num) = &tokens[1].trim_end().parse::<i16>() {
                                             let _ = serial.write("got a number".as_bytes());
 
-                                            output_channels[i].data = num;
-                                            output_channels[i].state = OutputChannelState::Pause;
-                                            output_channels[i].next_tick = 0;
-                                            output_channels[i].bit = 0;
+                                            output_channels[i].set(*num);
                                         } else {
                                             let _ = serial.write("got something else".as_bytes());
                                         }

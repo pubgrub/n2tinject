@@ -47,7 +47,7 @@ pub mod clock {
             self.state
         }
 
-        pub fn set_freq(&mut self, interval: u64) {
+        pub fn set_freq(&mut self, interval: &u64) {
             self.pulse_interval = SYS_TICKS / (interval * 2) * 10;
         }
 

@@ -5,7 +5,7 @@ pub mod format_str {
     use heapless::String;
 
     const SCROLL_LINES: usize = 5;
-    pub const PAGE_LINES: usize = 15;
+    pub const PAGE_LINES: usize = 18;
     pub const PAGE_WIDTH: usize = 80;
     pub const PAGE_STR_WIDTH: usize = PAGE_WIDTH + 20;
     const NEW_INTERVAL: u64 = 5_000;
@@ -114,19 +114,19 @@ pub mod format_str {
     }
 
     impl StaticPageText {
-        pub fn new(lines_str: [&str; PAGE_LINES], x: u8, first_y: u8) -> StaticPageText {
+        pub fn new(
+            lines: [String<PAGE_STR_WIDTH>; PAGE_LINES],
+            x: u8,
+            first_y: u8,
+        ) -> StaticPageText {
             let mut s: StaticPageText = StaticPageText {
-                lines: from_fn(|_| String::new()),
+                lines,
                 print_lines: from_fn(|_| String::new()),
                 x,
                 first_y,
             };
             for l in 0..PAGE_LINES {
-                //                println!("<--1 {}: {}: {} -->",l,lines_str[l],&s.lines[l].as_str());
-                s.lines[l].push_str(lines_str[l].as_ref()).unwrap();
-                //                println!("<--2 {}: {}: {} -->", l, lines_str[l], s.lines[l].as_str());
                 s.print_lines[l] = add_position(&s.lines[l], s.x, s.first_y + (l as u8));
-                //                println!("<--3 {}: {}: {} -->",l,lines_str[l],&s.print_lines[l].as_str());
             }
             s
         }

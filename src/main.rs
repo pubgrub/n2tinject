@@ -7,6 +7,8 @@ mod format_str;
 mod input_channel;
 mod output_channel;
 mod program;
+use core::array::from_fn;
+
 //mod string;
 
 use format_str::format_str::{DataText, ScrollText, StaticPageText};
@@ -34,11 +36,17 @@ use button::button::Button;
 use clock::clock::Clock;
 use input_channel::input_channel::InputChannel;
 use output_channel::output_channel::OutputChannel;
-use program::program::Program;
+use program::program::{Program, ProgramControl, ProgramMode};
 //use string::string::String;
+
+const CRYSTAL_FREQ: u32 = 12_000_000; // System frequency in Hz
+const TICKS_SECOND: u32 = 1_000_000; // USB Vendor ID
 
 const PAGE_LINES: usize = format_str::format_str::PAGE_LINES;
 const PAGE_STR_WIDTH: usize = format_str::format_str::PAGE_STR_WIDTH;
+const PAGE_WIDTH: usize = format_str::format_str::PAGE_WIDTH;
+
+const MAX_PROGRAMS: usize = program::program::MAX_PROGRAMS; // Maximum number of programs
 
 #[link_section = ".boot2"]
 #[used]
@@ -119,7 +127,7 @@ fn main() -> ! {
 
     // Initialise System Clock
     let sys_clocks = init_clocks_and_plls(
-        12_000_000u32,
+        CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
@@ -223,22 +231,15 @@ fn main() -> ! {
     let pin_7 = pins.gpio7.into_pull_down_input().into_dyn_pin();
 
     //setup output channels
-    let output_channel_1 = OutputChannel::new(pin_14, pin_15);
-    let output_channel_2 = OutputChannel::new(pin_16, pin_17);
-    let output_channel_3 = OutputChannel::new(pin_18, pin_19);
-    let output_channel_4 = OutputChannel::new(pin_20, pin_21);
-
     let mut output_channels: [OutputChannel; OUTPUT_CHANNELS] = [
-        output_channel_1,
-        output_channel_2,
-        output_channel_3,
-        output_channel_4,
+        OutputChannel::new(pin_14, pin_15),
+        OutputChannel::new(pin_16, pin_17),
+        OutputChannel::new(pin_18, pin_19),
+        OutputChannel::new(pin_20, pin_21),
     ];
 
     let blink_interval = 1_000_000u64;
     let mut blink_last = 0u64;
-
-    let mut now;
 
     let answer_str = "Answer:".as_bytes();
     let mut all_channels_str = String::new();
@@ -249,37 +250,88 @@ fn main() -> ! {
     }
 
     // setup buttons
-    let button1 = Button::new(pin_12);
-    let button2 = Button::new(pin_13);
+    let buttons: [Button; 2] = [Button::new(pin_12), Button::new(pin_13)];
 
     // setup clocks
-    let mut clock1 = Clock::new(pin_10, button1);
-    let mut clock2 = Clock::new(pin_11, button2);
+    let mut now = timer.get_counter().ticks();
 
-    let mut clocks = [&mut clock1, &mut clock2];
+    let clocks = [Clock::new(pin_10, now), Clock::new(pin_11, now)];
 
     // setup input channel
     let mut input_channel = InputChannel::new(pin_6, pin_8, pin_9, pin_7);
 
     // setup programs
     // Program 0 is special, will be caught by the main loop
-    const PROGRAMS: usize = 6;
-    let program00 = Program::new(String::from_str("Manual").unwrap(), 0, [0, 0]);
-    let program01 = Program::new(String::from_str("Sync").unwrap(), 3, [0b011, 0b011]);
-    let program02 = Program::new(String::from_str("Opp Sync").unwrap(), 5, [0b01100, 0b00011]);
-    let program03 = Program::new(String::from_str("Inner").unwrap(), 5, [0b01111, 0b00110]);
-    let program04 = Program::new(String::from_str("Overlap").unwrap(), 4, [0b0110, 0b0011]);
-    let program05 = Program::new(
-        String::from_str("Sequential").unwrap(),
-        6,
-        [0b011000, 0b000011],
-    );
+    let mut prog = ProgramControl::new(TICKS_SECOND, clocks, buttons);
 
-    let mut programs: [Program; PROGRAMS] = [
-        program00, program01, program02, program03, program04, program05,
+    prog.add_program(Program::new(
+        String::from_str("Sync").unwrap(),
+        2,
+        [0b01, 0b01],
+    ));
+    prog.add_program(Program::new(
+        String::from_str("Opp Sync").unwrap(),
+        2,
+        [0b10, 0b01],
+    ));
+    prog.add_program(Program::new(
+        String::from_str("Inner").unwrap(),
+        4,
+        [0b0111, 0b0010],
+    ));
+    prog.add_program(Program::new(
+        String::from_str("Overlap").unwrap(),
+        4,
+        [0b0110, 0b0011],
+    ));
+    prog.add_program(Program::new(
+        String::from_str("Sequential").unwrap(),
+        4,
+        [0b0100, 0b0001],
+    ));
+
+    let screen_str = [
+        "_____________________________________________________________________________",
+        "                                                                             ",
+        " OUT 1  -12345  0xFFFF  0b0000111100001111  |                     Mode  Freq ",
+        " OUT 2  -12345  0xFFFF  0b0000111100001111  |                                ",
+        " OUT 3  -12345  0xFFFF  0b0000111100001111  |  PROG 0 NAME______  AUTO    50 ",
+        " OUT 4  -12345  0xFFFF  0b0000111100001111  |                                ",
+        "                                            |  CLOCK 1    __XX__  AUTO    20 ",
+        " IN     -12345  0xFFFF  0b0000111100001111  |  CLOCK 2    __XX__  AUTO    30 ",
+        "_____________________________________________________________________________",
+        "                                                                             ",
+        "                                                                             ",
+        "                                                                             ",
+        "                                                                             ",
+        "                                                                             ",
+        "                                                                             ",
+        "                                                                             ",
+        "                                                                             ",
+        "                                                                             ",
     ];
 
-    let mut active_program = 0;
+    // wait for USB monitor
+    // while !serial.dtr() {
+    //     usb_dev.poll(&mut [&mut serial]);
+    // }
+
+    let mut screen: StaticPageText = StaticPageText::new(
+        from_fn(|i| {
+            let s = String::from_str(screen_str[i]).unwrap();
+            let _ = serial.write(&[i as u8]).unwrap();
+            s
+        }),
+        0,
+        1,
+    );
+
+    // clear screen
+    serial.write("\x1B[2J\x1B[H".as_bytes()).unwrap();
+    // print background
+    for l in screen.get_lines() {
+        let _ = serial.write(l.as_bytes());
+    }
 
     loop {
         now = timer.get_counter().ticks();
@@ -295,20 +347,19 @@ fn main() -> ! {
             channel.update(now);
         }
 
-        // handle clocks
-        for clock in clocks.iter_mut() {
-            clock.update(now);
-        }
+        // handle program control
+
+        prog.update(now);
 
         // handle input channel
         input_channel.update(now);
-        let _ = serial.write(&u16_to_str(input_channel.data).buf);
+        // let _ = serial.write(&u16_to_str(input_channel.data).buf);
 
-        let _ = serial.write(&u16_to_str(input_channel.data).buf);
+        // let _ = serial.write(&u16_to_str(input_channel.data).buf);
         if input_channel.data_changed {
             let data = input_channel.data;
             let data_str = u16_to_str(data);
-            let _ = serial.write(&data_str.buf);
+            //let _ = serial.write(&data_str.buf);
             input_channel.data_changed = false;
         }
 
@@ -342,66 +393,93 @@ fn main() -> ! {
                         tokens[0] = all_channels_str.clone();
                         changed = true;
                     }
+                    "a" => {
+                        // a
+                        if prog.get_current_program() > 0 {
+                            prog.mode = match prog.mode {
+                                ProgramMode::Manual => ProgramMode::Auto,
+                                ProgramMode::Auto => ProgramMode::Manual,
+                                ProgramMode::OneShot => ProgramMode::Auto,
+                            };
+                            prog.reset_state();
+                        } else {
+                            // MSG TODO
+                        }
+                    }
+
+                    // f x
+                    "f" => {
+                        if prog.get_current_program() > 0 {
+                            // is other a number?
+                            if let Ok(num) = &tokens[1].trim_end().parse::<u64>() {
+                                prog.set_freq(*num as u32);
+                            }
+                        } else {
+                            // MSG TODO
+                        }
+                    }
 
                     "c" => {
-                        match tokens[1].as_str() {
-                            "sync" => {
-                                match tokens[2].as_str() {
-                                    // c sync opp
-                                    "opp" => {
-                                        let (clock1, clock2) = clocks.split_at_mut(1);
-                                        clock1[0].sync_opposite(&mut clock2[0]);
-                                    }
-                                    // c sync
-                                    _ => {
-                                        let (clock1, clock2) = clocks.split_at_mut(1);
-                                        clock1[0].sync(&mut clock2[0]);
+                        if prog.get_current_program() == 0 {
+                            match tokens[1].as_str() {
+                                "s" => {
+                                    prog.clocks_sync();
+                                }
+                                "so" => {
+                                    prog.clocks_sync_opposite();
+                                }
+                                "a" => {
+                                    for i in 0..2 {
+                                        prog.clock_toggle_auto(i);
                                     }
                                 }
+                                "f" => {
+                                    // is other a number?
+                                    if let Ok(num) = &tokens[2].trim_end().parse::<u64>() {
+                                        for i in 0..2 {
+                                            prog.clock_set_freq(i, num);
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                        } else {
+                            // MSG TODO
                         }
                     }
 
                     "c1" | "c2" => {
-                        let clock_index = match tokens[0].as_str() {
-                            "c1" => 0,
-                            "c2" => 1,
-                            _ => 0,
-                        };
-                        match tokens[1].as_str() {
-                            // cx auto
-                            "auto" => {
-                                clocks[clock_index].auto = true;
-                                clocks[clock_index].next_tick = now;
-                                clocks[clock_index].state = false;
-                            }
-                            // cx on
-                            "on" => {
-                                clocks[clock_index].auto = false;
-                                clocks[clock_index].state = true;
-                            }
-                            // cx off
-                            "off" => {
-                                clocks[clock_index].auto = false;
-                                clocks[clock_index].state = false;
-                            }
-                            // cx f y
-                            "f" => {
-                                // is other a number?
-                                if let Ok(num) = &tokens[2].trim_end().parse::<u64>() {
-                                    clocks[clock_index].set_freq(num);
+                        if prog.get_current_program() == 0 {
+                            let clock_index = match tokens[0].as_str() {
+                                "c1" => 0,
+                                "c2" => 1,
+                                _ => 0,
+                            };
+                            match tokens[1].as_str() {
+                                // cx a
+                                "a" => {
+                                    prog.clock_toggle_auto(clock_index);
                                 }
+                                // cx f y
+                                "f" => {
+                                    // is other a number?
+                                    if let Ok(num) = &tokens[2].trim_end().parse::<u64>() {
+                                        prog.clock_set_freq(clock_index, num);
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
                     "p" => {
                         // p x
                         if let Ok(num) = &tokens[1].trim_end().parse::<u8>() {
-                            if *num > PROGRAMS as u8 {
+                            if *num > prog.number_of_programs() as u8 {
+                                // MSG TODO
                             } else {
-                                active_program = *num as usize;
+                                prog.set_program(*num as usize);
+                                prog.reset_state();
+                                prog.mode = ProgramMode::Manual;
                             }
                         }
                     }

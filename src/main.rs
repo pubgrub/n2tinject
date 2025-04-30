@@ -7,6 +7,7 @@ mod format_str;
 mod input_channel;
 mod output_channel;
 mod program;
+mod text_input;
 use core::array::from_fn;
 
 //mod string;
@@ -37,6 +38,7 @@ use clock::clock::Clock;
 use input_channel::input_channel::InputChannel;
 use output_channel::output_channel::OutputChannel;
 use program::program::{Program, ProgramControl, ProgramMode};
+use text_input::text_input::{TextInput, TextInputState};
 //use string::string::String;
 
 const CRYSTAL_FREQ: u32 = 12_000_000; // System frequency in Hz
@@ -307,14 +309,16 @@ fn main() -> ! {
         "                                                                             ",
         "                                                                             ",
         "                                                                             ",
-        "                                                                             ",
+        " Command:                                                                    ",
         "                                                                             ",
     ];
 
-    // wait for USB monitor
-    // while !serial.dtr() {
-    //     usb_dev.poll(&mut [&mut serial]);
-    // }
+    //wait for USB monitor
+    while !serial.dtr() {
+        usb_dev.poll(&mut [&mut serial]);
+    }
+
+    let mut input_buffer: TextInput = TextInput::new();
 
     let mut screen: StaticPageText = StaticPageText::new(
         from_fn(|i| {
@@ -375,12 +379,22 @@ fn main() -> ! {
         // Handle Input
         //
         // any input found?
+        let mut input_str = String::new();
         if let Ok(count) = serial.read(&mut buf) {
-            let mut input_str: String<PAGE_STR_WIDTH> = String::new();
+            let mut input_state = TextInputState::new();
             for i in 0..count {
-                input_str.push(buf[i] as char).unwrap();
+                if input_state.is_changed {
+                    // TODO print command
+                    continue;
+                }
+                input_state = input_buffer.add_char(buf[i] as char);
+                if input_state.is_done {
+                    input_str = input_state.text;
+                }
             }
-
+            if input_str.len() == 0 {
+                continue;
+            }
             let mut tokens = tokenize(input_str); // split input into tokens
             let mut changed = true;
             while changed {

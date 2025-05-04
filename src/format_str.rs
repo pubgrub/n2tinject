@@ -1,7 +1,6 @@
 pub mod format_str {
-    use core::array::from_fn;
     use core::fmt::Write;
-    use dyn_fmt::dyn_write;
+    use core::{array::from_fn, str::FromStr};
     use heapless::String;
 
     const SCROLL_LINES: usize = 5;
@@ -31,13 +30,13 @@ pub mod format_str {
             }
             s
         }
-        pub fn add_line(&mut self, new_line: String<PAGE_STR_WIDTH>) {
+        pub fn add_line(&mut self, new_line: &str) {
             for i in (0..SCROLL_LINES - 1).rev() {
                 self.lines[i + 1] = core::mem::take(&mut self.lines[i]);
                 self.print_lines[i + 1] =
                     add_position(&self.lines[i + 1], self.x, self.first_y + (i as u8 + 1));
             }
-            self.lines[0] = new_line;
+            self.lines[0] = String::from_str(new_line).unwrap();
             self.print_lines[0] = bold(&add_position(&self.lines[0], self.x, self.first_y));
             self.is_changed = true;
         }
@@ -47,6 +46,7 @@ pub mod format_str {
         }
     }
 
+    #[derive(Debug)]
     pub struct DataText {
         format_str: String<PAGE_STR_WIDTH>,
         text: String<PAGE_STR_WIDTH>,
@@ -67,20 +67,25 @@ pub mod format_str {
             mark_as_new: bool,
         ) -> DataText {
             DataText {
-                format_str: format_str,
+                format_str,
                 text: String::new(),
                 print_text: String::new(),
-                x: x,
-                y: y,
-                mark_as_new: mark_as_new,
+                x,
+                y,
+                mark_as_new,
                 is_new: false,
                 new_until: 0,
                 is_changed: false,
             }
         }
-        pub fn set<T: core::fmt::Display>(&mut self, val: &T, now: u64) {
+        pub fn set<T: core::fmt::Display + DynamicFormatArg>(&mut self, val: &T, now: u64) {
             self.text.clear();
-            dyn_write!(self.text, self.format_str.as_str(), &[val]).unwrap();
+            let args: &[&dyn DynamicFormatArg] = &[val];
+            for arg in args.iter() {
+                arg.format(&mut self.text, self.format_str.as_str())
+                    .unwrap();
+            }
+            self.print_text = self.text.clone();
             if self.mark_as_new {
                 self.print_text = invert(&self.text);
 
@@ -102,6 +107,10 @@ pub mod format_str {
         pub fn get_text(&mut self) -> &String<PAGE_STR_WIDTH> {
             self.is_changed = false;
             &self.print_text
+        }
+
+        pub fn get_cursor(&self) -> (u8, u8) {
+            (self.x + self.text.len() as u8, self.y)
         }
     }
 
@@ -133,18 +142,6 @@ pub mod format_str {
         pub fn get_lines(&mut self) -> &[String<PAGE_STR_WIDTH>; PAGE_LINES] {
             &self.print_lines
         }
-        pub fn edit_line(&mut self, line: usize, start: u8, str: &str) {
-            let line_index = line - 1;
-            if line_index < PAGE_LINES {
-                let result: String<PAGE_STR_WIDTH> = edit_str(&self.lines[line_index], start, str);
-                self.lines[line_index] = result;
-                self.print_lines[line_index] = add_position(
-                    &self.lines[line_index],
-                    self.x,
-                    self.first_y + (line_index as u8),
-                );
-            }
-        }
     }
 
     static INVERTED_ON: &str = "\x1B[7m";
@@ -152,27 +149,6 @@ pub mod format_str {
 
     static BOLD_ON: &str = "\x1B[1m";
     static BOLD_OFF: &str = "\x1B[0m";
-
-    pub fn edit_str(
-        str: &String<PAGE_STR_WIDTH>,
-        start: u8,
-        str_to_add: &str,
-    ) -> String<PAGE_STR_WIDTH> {
-        let end = start + str_to_add.len() as u8 - 1;
-        if end > PAGE_WIDTH as u8 {
-            panic!("Line is too long");
-        }
-        if start > PAGE_WIDTH as u8 {
-            panic!("Line is too short");
-        }
-        let pre_str = &str.clone()[0..start as usize];
-        let post_str = &str.clone()[end as usize + 1..];
-        let mut result: String<PAGE_STR_WIDTH> = String::new();
-        result.push_str(pre_str).unwrap();
-        result.push_str(str_to_add).unwrap();
-        result.push_str(post_str).unwrap();
-        result
-    }
 
     /// This function adds ANSI escape codes to invert the text color.
     ///
@@ -221,23 +197,38 @@ pub mod format_str {
     ///
     /// A new string with the ANSI escape codes prepended.
     fn add_position(str: &String<PAGE_STR_WIDTH>, x: u8, y: u8) -> String<PAGE_STR_WIDTH> {
-        let mut result = String::new();
+        let mut result: String<PAGE_STR_WIDTH> = String::new();
         write!(result, "\x1B[{};{}H", y, x).unwrap();
-        //        println!("before: {}", result);
         result.push_str(str).unwrap();
-        //        println!("after: {}", result);
         result
     }
 
-    fn str_len(str: &[u8; PAGE_STR_WIDTH]) -> u8 {
-        let mut str_len = 0;
-        for s in str.iter() {
-            if *s == 0 {
-                break;
-            } else {
-                str_len += 1;
+    pub trait DynamicFormatArg {
+        fn format(&self, f: &mut dyn core::fmt::Write, fmt: &str) -> core::fmt::Result;
+    }
+    impl DynamicFormatArg for i16 {
+        fn format(&self, f: &mut dyn core::fmt::Write, fmt: &str) -> core::fmt::Result {
+            match fmt {
+                "{:>4}" => write!(f, "{:>4}", self),
+                "{:>6}" => write!(f, "{:>6}", self),
+                "{:#06X}" => write!(f, "{:#06X}", self),
+                "{:#018b}" => write!(f, "{:#018b}", self),
+                _ => write!(f, "{}", self),
             }
         }
-        str_len
+    }
+    impl DynamicFormatArg for String<PAGE_STR_WIDTH> {
+        fn format(&self, f: &mut dyn core::fmt::Write, fmt: &str) -> core::fmt::Result {
+            match fmt {
+                _ => write!(f, "{}", self),
+            }
+        }
+    }
+    impl DynamicFormatArg for &str {
+        fn format(&self, f: &mut dyn core::fmt::Write, fmt: &str) -> core::fmt::Result {
+            match fmt {
+                _ => write!(f, "{}", self),
+            }
+        }
     }
 }

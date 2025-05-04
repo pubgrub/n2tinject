@@ -7,38 +7,49 @@ pub mod clock {
     use rp2040_hal::gpio::{DynPinId, FunctionSioOutput, Pin, PullDown};
 
     use crate::button::button::ButtonState;
+    pub enum ClockMode {
+        Manual,
+        Auto,
+    }
 
     pub struct Clock {
         pin: Pin<DynPinId, FunctionSioOutput, PullDown>,
-        pulse_interval: u64,
-        pub auto: bool,
+        ticks_per_step: u64,
+        pub mode: ClockMode,
         pub next_tick: u64,
         pub state: bool,
+        pub freq: u64,
     }
 
     impl Clock {
         pub fn new(pin: Pin<DynPinId, FunctionSioOutput, PullDown>, now: u64) -> Self {
-            Clock {
+            let mut cl = Clock {
                 pin,
-                pulse_interval: 1000,
-                auto: false,
+                ticks_per_step: 1000,
+                mode: ClockMode::Manual,
                 next_tick: now,
                 state: false,
-            }
+                freq: 10,
+            };
+            cl.set_ticks_per_step();
+            cl
         }
 
         pub fn update(&mut self, now: u64, button_state: &ButtonState) -> bool {
             let mut changed = false;
-            if self.auto {
-                if now > self.next_tick {
-                    self.state = !self.state;
-                    self.next_tick += self.pulse_interval;
-                    changed = true;
+            match self.mode {
+                ClockMode::Manual => {
+                    if button_state.state_changed {
+                        self.state = button_state.state;
+                        changed = true;
+                    }
                 }
-            } else {
-                if button_state.state_changed {
-                    self.state = button_state.state;
-                    changed = true;
+                ClockMode::Auto => {
+                    if now > self.next_tick {
+                        self.state = !self.state;
+                        self.next_tick += self.ticks_per_step;
+                        changed = true;
+                    }
                 }
             }
             if changed {
@@ -48,7 +59,8 @@ pub mod clock {
         }
 
         pub fn set_freq(&mut self, interval: &u64) {
-            self.pulse_interval = SYS_TICKS / (interval * 2) * 10;
+            self.freq = *interval;
+            self.set_ticks_per_step();
         }
 
         pub fn sync(&mut self, clock2: &mut Clock) {
@@ -58,7 +70,7 @@ pub mod clock {
 
         pub fn sync_opposite(&mut self, clock2: &mut Clock) {
             clock2.state = self.state;
-            clock2.next_tick = self.next_tick + self.pulse_interval;
+            clock2.next_tick = self.next_tick + self.ticks_per_step;
         }
 
         pub fn set_pin(&mut self, state: bool) {
@@ -67,6 +79,9 @@ pub mod clock {
             } else {
                 self.pin.set_low().unwrap();
             }
+        }
+        fn set_ticks_per_step(&mut self) {
+            self.ticks_per_step = SYS_TICKS * 10 / (self.freq * 2);
         }
     }
 }

@@ -1,7 +1,7 @@
 pub mod program {
 
-    use crate::button::button::{Button, ButtonState};
-    use crate::clock::clock::Clock;
+    use crate::button::button::Button;
+    use crate::clock::clock::{Clock, ClockMode};
     use crate::format_str;
     use core::str::FromStr;
     use heapless::{String, Vec};
@@ -31,9 +31,6 @@ pub mod program {
         pub fn get_sequence_length(&self) -> u8 {
             self.sequence_length
         }
-        pub fn get_sequence(&self) -> &[usize; 2] {
-            &self.sequence
-        }
 
         pub fn get_signals(&self, state: u8) -> [bool; 2] {
             [
@@ -57,35 +54,39 @@ pub mod program {
         current_program: usize,
         pub mode: ProgramMode,
         state: u8,
-        tick_freq: u32,
+        pub prog_freq: u32,
+        pub sys_freq: u32,
         ticks_per_step: u32,
+
         next_tick: u64,
     }
 
     impl ProgramControl {
-        pub fn new(tick_freq: u32, clocks: [Clock; 2], buttons: [Button; 2]) -> Self {
+        pub fn new(sys_freq: u32, clocks: [Clock; 2], buttons: [Button; 2]) -> Self {
             let mut p_control = ProgramControl {
-                tick_freq,
+                sys_freq,
                 clocks,
                 buttons,
                 program_list: Vec::new(),
                 current_program: 0,
                 state: 0,
                 mode: ProgramMode::Manual,
-                ticks_per_step: tick_freq, // 1s tick length as default
+                prog_freq: 10,
+                ticks_per_step: 1, // dummy value
                 next_tick: 0,
             };
             p_control.add_program(Program::new(
-                String::from_str("Manual").unwrap(),
-                0,
+                String::from_str("Manual    ").unwrap(),
+                1,
                 [0b0, 0b0],
             ));
+            p_control.set_ticks_per_step();
             p_control
         }
 
         pub fn add_program(&mut self, program: Program) {
             if self.program_list.len() < MAX_PROGRAMS {
-                self.program_list.push(program);
+                self.program_list.push(program).ok();
             } else {
                 panic!("Program list is full");
             }
@@ -155,8 +156,10 @@ pub mod program {
         pub fn set_program(&mut self, program: usize) -> bool {
             if program < self.program_list.len() {
                 self.current_program = program;
+                self.mode = ProgramMode::Manual;
                 self.state = 0;
                 self.next_tick = 0;
+                self.set_ticks_per_step();
                 true
             } else {
                 false
@@ -165,6 +168,10 @@ pub mod program {
 
         pub fn get_current_program(&mut self) -> usize {
             self.current_program
+        }
+
+        pub fn get_current_program_name(&mut self) -> &String<PAGE_STR_WIDTH> {
+            &self.program_list[self.current_program].get_name()
         }
 
         pub fn clocks_sync(&mut self) {
@@ -177,8 +184,18 @@ pub mod program {
         }
         pub fn clock_toggle_auto(&mut self, clock: usize) {
             if clock < self.clocks.len() {
-                self.clocks[clock].auto = !self.clocks[clock].auto;
+                self.clocks[clock].mode = match self.clocks[clock].mode {
+                    ClockMode::Manual => ClockMode::Auto,
+                    ClockMode::Auto => ClockMode::Manual,
+                };
             }
+        }
+        pub fn clock_set_auto(&mut self, clock: usize, mode: bool) {
+            self.clocks[clock].mode = if mode {
+                ClockMode::Auto
+            } else {
+                ClockMode::Manual
+            };
         }
         pub fn clock_set_freq(&mut self, clock: usize, interval: &u64) {
             if clock < self.clocks.len() {
@@ -191,7 +208,12 @@ pub mod program {
         }
 
         pub fn set_freq(&mut self, freq: u32) {
-            self.ticks_per_step = self.tick_freq / freq * 10;
+            self.prog_freq = freq;
+            self.set_ticks_per_step();
+        }
+        pub fn set_ticks_per_step(&mut self) {
+            let steps: u32 = self.program_list[self.current_program].get_sequence_length() as u32;
+            self.ticks_per_step = self.sys_freq / (self.prog_freq / 10 * steps);
         }
     }
 }

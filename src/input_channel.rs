@@ -17,12 +17,12 @@ pub mod input_channel {
         pin_shift_clock: Pin<DynPinId, FunctionSioOutput, PullDown>,
         pin_data_in: Pin<DynPinId, FunctionSioInput, PullDown>,
         pub state: InputChannelState,
-        temp_data: u16,
-        pub data: u16,
-        old_data: u16,
-        temp_data_mirrored: u16,
+        temp_data: i16,
+        pub data: i16,
+        old_data: i16,
+        temp_data_mirrored: i16,
         pub mirrored: bool,
-        pub data_mirrored: u16,
+        pub data_mirrored: i16,
         next_tick: u64,
         tick_interval: u64,
         bit_count: u8,
@@ -35,6 +35,7 @@ pub mod input_channel {
             pin_serial_shift: Pin<DynPinId, FunctionSioOutput, PullDown>,
             pin_shift_clock: Pin<DynPinId, FunctionSioOutput, PullDown>,
             pin_data_in: Pin<DynPinId, FunctionSioInput, PullDown>,
+            now: u64,
         ) -> Self {
             InputChannel {
                 pin_load_data,
@@ -48,10 +49,10 @@ pub mod input_channel {
                 temp_data_mirrored: 0,
                 mirrored: false,
                 data_mirrored: 0,
-                next_tick: 0,
+                next_tick: now,
                 tick_interval: 1_000,
                 bit_count: 0,
-                data_changed: false,
+                data_changed: true,
             }
         }
 
@@ -73,9 +74,9 @@ pub mod input_channel {
                     }
                     InputChannelState::SerialShiftOff => {
                         self.temp_data =
-                            (self.temp_data << 1) | self.pin_data_in.is_high().unwrap() as u16;
+                            (self.temp_data << 1) | self.pin_data_in.is_high().unwrap() as i16;
                         self.temp_data_mirrored = (self.temp_data_mirrored >> 1)
-                            | (self.pin_data_in.is_high().unwrap() as u16) << 15;
+                            | (self.pin_data_in.is_high().unwrap() as i16) << 15;
                         self.bit_count += 1;
                         if self.bit_count == 16 {
                             self.bit_count = 0;

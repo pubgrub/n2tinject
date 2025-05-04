@@ -1,13 +1,6 @@
 pub mod output_channel {
     use embedded_hal::digital::OutputPin;
-    use rp2040_hal::{
-        clocks::init_clocks_and_plls,
-        gpio::{DynPinId, FunctionSioOutput, Pin, PinState, PullDown},
-        pac,
-        sio::Sio,
-        watchdog::Watchdog,
-        Timer,
-    };
+    use rp2040_hal::gpio::{DynPinId, FunctionSioOutput, Pin, PullDown};
 
     //     STATE:  IDLE  (new data)->   PAUSE   DATASET   ENABLESET    PAUSE
     //
@@ -43,7 +36,7 @@ pub mod output_channel {
             OutputChannel {
                 data_pin,
                 enable_pin,
-                state: OutputChannelState::Idle,
+                state: OutputChannelState::Pause,
                 data: 0,
                 bit: 0,
                 next_tick: 0,
